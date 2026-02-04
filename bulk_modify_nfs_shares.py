@@ -125,25 +125,67 @@ class NFSShareModifier:
         if self.client:
             self.client.__exit__(exc_type, exc_val, exc_tb)
 
-    def query_shares(self, path_pattern: Optional[str] = None) -> List[Dict[str, Any]]:
+    def query_shares(self, path_pattern: Optional[str] = None,
+                     filter_comment: Optional[str] = None,
+                     filter_ro: bool = False,
+                     filter_rw: bool = False,
+                     filter_enabled: bool = False,
+                     filter_disabled: bool = False,
+                     filter_networks: Optional[List[str]] = None,
+                     filter_hosts: Optional[List[str]] = None,
+                     filter_security: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
-        Query NFS shares, optionally filtering by path pattern.
+        Query NFS shares, optionally filtering by path pattern and other attributes.
 
         Args:
             path_pattern: Glob pattern to match share paths (e.g., "/mnt/pool/*")
+            filter_comment: Glob pattern to match share comments
+            filter_ro: Only match read-only shares
+            filter_rw: Only match read-write shares
+            filter_enabled: Only match enabled shares
+            filter_disabled: Only match disabled shares
+            filter_networks: Only match shares containing all these networks
+            filter_hosts: Only match shares containing all these hosts
+            filter_security: Only match shares with all these security types
 
         Returns:
             List of NFS share objects
         """
         print("Querying NFS shares...")
         shares = self.client.call("sharing.nfs.query")
+        total_shares = len(shares)
 
         if path_pattern:
-            # Filter shares by path pattern using fnmatch
             shares = [s for s in shares if fnmatch.fnmatch(s['path'], path_pattern)]
-            print(f"Found {len(shares)} share(s) matching pattern '{path_pattern}'")
-        else:
-            print(f"Found {len(shares)} total share(s)")
+
+        if filter_comment:
+            shares = [s for s in shares if fnmatch.fnmatch(s.get('comment', ''), filter_comment)]
+
+        if filter_ro:
+            shares = [s for s in shares if s.get('ro', False)]
+
+        if filter_rw:
+            shares = [s for s in shares if not s.get('ro', False)]
+
+        if filter_enabled:
+            shares = [s for s in shares if s.get('enabled', True)]
+
+        if filter_disabled:
+            shares = [s for s in shares if not s.get('enabled', True)]
+
+        if filter_networks:
+            for network in filter_networks:
+                shares = [s for s in shares if network in s.get('networks', [])]
+
+        if filter_hosts:
+            for host in filter_hosts:
+                shares = [s for s in shares if host in s.get('hosts', [])]
+
+        if filter_security:
+            for sec in filter_security:
+                shares = [s for s in shares if sec in s.get('security', [])]
+
+        print(f"Found {len(shares)} share(s) matching filters (out of {total_shares} total)")
 
         return shares
 
@@ -237,7 +279,15 @@ class NFSShareModifier:
                    set_mapall_group: str = None,
                    clear_maproot: bool = False,
                    clear_mapall: bool = False,
-                   dry_run: bool = False) -> Dict[str, Any]:
+                   dry_run: bool = False,
+                   filter_comment: str = None,
+                   filter_ro: bool = False,
+                   filter_rw: bool = False,
+                   filter_enabled: bool = False,
+                   filter_disabled: bool = False,
+                   filter_networks: List[str] = None,
+                   filter_hosts: List[str] = None,
+                   filter_security: List[str] = None) -> Dict[str, Any]:
         """
         Bulk modify NFS shares matching the pattern.
 
@@ -260,11 +310,29 @@ class NFSShareModifier:
             clear_maproot: Clear maproot user and group
             clear_mapall: Clear mapall user and group
             dry_run: If True, show changes without applying them
+            filter_comment: Glob pattern to match share comments
+            filter_ro: Only match read-only shares
+            filter_rw: Only match read-write shares
+            filter_enabled: Only match enabled shares
+            filter_disabled: Only match disabled shares
+            filter_networks: Only match shares containing all these networks
+            filter_hosts: Only match shares containing all these hosts
+            filter_security: Only match shares with all these security types
 
         Returns:
             Dictionary with statistics about the operation
         """
-        shares = self.query_shares(path_pattern)
+        shares = self.query_shares(
+            path_pattern=path_pattern,
+            filter_comment=filter_comment,
+            filter_ro=filter_ro,
+            filter_rw=filter_rw,
+            filter_enabled=filter_enabled,
+            filter_disabled=filter_disabled,
+            filter_networks=filter_networks,
+            filter_hosts=filter_hosts,
+            filter_security=filter_security
+        )
 
         if not shares:
             print("No shares found matching the pattern.")
@@ -432,6 +500,23 @@ def main():
     # Filter arguments
     parser.add_argument('--pattern', default='*',
                        help='Glob pattern to match share paths (default: "*")')
+    parser.add_argument('--filter-comment',
+                       help='Glob pattern to match share comments')
+    parser.add_argument('--filter-ro', action='store_true',
+                       help='Only match read-only shares')
+    parser.add_argument('--filter-rw', action='store_true',
+                       help='Only match read-write shares')
+    parser.add_argument('--filter-enabled', action='store_true',
+                       help='Only match enabled shares')
+    parser.add_argument('--filter-disabled', action='store_true',
+                       help='Only match disabled shares')
+    parser.add_argument('--filter-has-network', action='append', dest='filter_networks',
+                       help='Only match shares containing this network (repeatable)')
+    parser.add_argument('--filter-has-host', action='append', dest='filter_hosts',
+                       help='Only match shares containing this host (repeatable)')
+    parser.add_argument('--filter-has-security', action='append', dest='filter_security',
+                       choices=['SYS', 'KRB5', 'KRB5I', 'KRB5P'],
+                       help='Only match shares with this security type (repeatable)')
 
     # Modification arguments - Networks and Hosts
     parser.add_argument('--add-network', action='append', dest='add_networks',
@@ -500,6 +585,10 @@ def main():
         parser.error("Cannot use both --enable and --disable")
     if args.set_expose_snapshots_true and args.set_expose_snapshots_false:
         parser.error("Cannot use both --set-expose-snapshots and --unset-expose-snapshots")
+    if args.filter_ro and args.filter_rw:
+        parser.error("Cannot use both --filter-ro and --filter-rw")
+    if args.filter_enabled and args.filter_disabled:
+        parser.error("Cannot use both --filter-enabled and --filter-disabled")
 
     # Process boolean flags into actual values
     set_ro = True if args.set_ro_true else (False if args.set_ro_false else None)
@@ -551,7 +640,15 @@ def main():
                 set_mapall_group=args.set_mapall_group,
                 clear_maproot=args.clear_maproot,
                 clear_mapall=args.clear_mapall,
-                dry_run=args.dry_run
+                dry_run=args.dry_run,
+                filter_comment=args.filter_comment,
+                filter_ro=args.filter_ro,
+                filter_rw=args.filter_rw,
+                filter_enabled=args.filter_enabled,
+                filter_disabled=args.filter_disabled,
+                filter_networks=args.filter_networks,
+                filter_hosts=args.filter_hosts,
+                filter_security=args.filter_security
             )
 
             # Print summary
